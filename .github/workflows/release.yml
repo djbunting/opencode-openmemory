@@ -23,6 +23,8 @@ jobs:
 
       - run: bun run typecheck
 
+      - run: bun test
+
       - run: bun run build
 
       - run: npm publish --access public

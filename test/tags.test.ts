@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { getProjectId, getScopeKey, getScopes, getUserId } from "../src/services/tags.js";
+import {
+  getProjectId,
+  getProjectScopeId,
+  getScopeKey,
+  getScopes,
+  getUserId,
+  normalizePathForId,
+} from "../src/services/tags.js";
 import { CONFIG } from "../src/config.js";
 
 const USER_A = "aaaaaaaaaaaaaaaa";
@@ -73,9 +80,57 @@ describe("getProjectId", () => {
     expect(getProjectId("/some/dir")).not.toBe(getProjectId("/some/other-dir"));
   });
 
-  test("is case- and separator-sensitive (no path normalisation)", () => {
-    expect(getProjectId("/Some/Dir")).not.toBe(getProjectId("/some/dir"));
-    expect(getProjectId("/some/dir/")).not.toBe(getProjectId("/some/dir"));
+  test("ignores a trailing separator", () => {
+    expect(getProjectId("/some/dir/")).toBe(getProjectId("/some/dir"));
+  });
+
+  test("treats forward and backward slashes as the same path", () => {
+    // Regression guard: hashing the raw string gave `C:\p` and `C:/p`
+    // different ids, silently splitting one project's memories in two.
+    expect(getProjectId("C:\\temp\\proj")).toBe(getProjectId("C:/temp/proj"));
+  });
+
+  test("folds case only where the filesystem is case-insensitive", () => {
+    const sameIgnoringCase = getProjectId("/Some/Dir") === getProjectId("/some/dir");
+    // POSIX paths are case-sensitive, so /Some/Dir and /some/dir really are
+    // different directories and must not collide.
+    expect(sameIgnoringCase).toBe(process.platform === "win32");
+  });
+});
+
+describe("normalizePathForId", () => {
+  test("produces one canonical form for every spelling of a path", () => {
+    const variants = ["C:\\temp\\proj", "C:/temp/proj", "C:\\temp\\proj\\", "C:/temp/proj/"];
+    const normalized = new Set(variants.map(normalizePathForId));
+    expect(normalized.size).toBe(1);
+  });
+
+  test("never leaves a trailing separator", () => {
+    expect(normalizePathForId("/a/b/")).not.toMatch(/\/$/);
+  });
+
+  test("keeps distinct directories distinct", () => {
+    expect(normalizePathForId("/a/b")).not.toBe(normalizePathForId("/a/c"));
+  });
+});
+
+describe("getProjectScopeId", () => {
+  test("prefers OpenCode's stable project id over any path", () => {
+    expect(getProjectScopeId("/any/dir", { id: "proj_abc" })).toBe("proj_abc");
+  });
+
+  test("the same project id wins regardless of the directory given", () => {
+    expect(getProjectScopeId("/dir/one", { id: "proj_abc" })).toBe(
+      getProjectScopeId("/dir/two", { id: "proj_abc" })
+    );
+  });
+
+  test("falls back to the worktree root when there is no project id", () => {
+    expect(getProjectScopeId("/repo/packages/web", { worktree: "/repo" })).toBe(getProjectId("/repo"));
+  });
+
+  test("falls back to the directory when neither id nor worktree is given", () => {
+    expect(getProjectScopeId("/repo")).toBe(getProjectId("/repo"));
   });
 });
 

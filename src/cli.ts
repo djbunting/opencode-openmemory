@@ -8,7 +8,7 @@ import { stripJsoncComments } from "./services/jsonc.js";
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
-const PLUGIN_NAME = "@happycastle/opencode-openmemory@latest";
+const PLUGIN_NAME = "@djbunting/opencode-openmemory@latest";
 
 const OPENMEMORY_INIT_COMMAND = `---
 description: Initialize OpenMemory with comprehensive codebase knowledge

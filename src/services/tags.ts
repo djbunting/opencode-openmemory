@@ -1,10 +1,27 @@
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
+import { resolve } from "node:path";
 import { CONFIG } from "../config.js";
 import type { MemoryScopeContext } from "../types/index.js";
 
 function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 16);
+}
+
+/**
+ * Canonicalises a filesystem path before it is hashed into an identifier.
+ *
+ * Hashing a raw path string is not safe: the same project reached as
+ * `C:\proj`, `C:/proj`, `C:\proj\` and `c:\proj` produces four different
+ * hashes, which silently splits a user's memories into disjoint scopes
+ * that can never see each other. Normalise separators, drop any trailing
+ * separator, and fold case only on Windows (where the filesystem is
+ * case-insensitive); POSIX paths are case-sensitive so folding there
+ * would wrongly merge genuinely distinct directories.
+ */
+export function normalizePathForId(directory: string): string {
+  const absolute = resolve(directory).replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
 }
 
 export function getGitEmail(): string | null {
@@ -26,13 +43,32 @@ export function getUserId(): string {
 }
 
 export function getProjectId(directory: string): string {
-  return sha256(directory);
+  return sha256(normalizePathForId(directory));
 }
 
-export function getScopes(directory: string): { user: MemoryScopeContext; project: MemoryScopeContext } {
+/**
+ * Identity of the project a session belongs to.
+ *
+ * Prefers OpenCode's own `project.id`, which is stable across sessions and
+ * independent of how the path was spelled or which subdirectory the session
+ * was opened from. Falls back to hashing the worktree root (or the given
+ * directory) when OpenCode doesn't supply one — e.g. older hosts or tests.
+ */
+export function getProjectScopeId(
+  directory: string,
+  project?: { id?: string; worktree?: string }
+): string {
+  if (project?.id) return project.id;
+  return getProjectId(project?.worktree || directory);
+}
+
+export function getScopes(
+  directory: string,
+  project?: { id?: string; worktree?: string }
+): { user: MemoryScopeContext; project: MemoryScopeContext } {
   const userId = getUserId();
-  const projectId = getProjectId(directory);
-  
+  const projectId = getProjectScopeId(directory, project);
+
   return {
     user: { userId },
     project: { userId, projectId },

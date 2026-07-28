@@ -75,8 +75,19 @@ export function createCompactionHook(
   scopes: { user: MemoryScopeContext; project: MemoryScopeContext }
 ) {
   // Summary messages we have already persisted, so repeated `message.updated`
-  // events for the same message don't create duplicate memories.
+  // events for the same message don't create duplicate memories. Bounded so
+  // a long-lived server process doesn't accumulate ids forever; compactions
+  // are rare, and re-saving one evicted long ago is harmless.
   const savedSummaryMessages = new Set<string>();
+  const MAX_TRACKED_SUMMARIES = 256;
+
+  function rememberSummary(messageId: string): void {
+    if (savedSummaryMessages.size >= MAX_TRACKED_SUMMARIES) {
+      const oldest = savedSummaryMessages.values().next().value;
+      if (oldest !== undefined) savedSummaryMessages.delete(oldest);
+    }
+    savedSummaryMessages.add(messageId);
+  }
 
   async function fetchProjectMemoriesForCompaction(): Promise<string[]> {
     try {
@@ -114,7 +125,7 @@ export function createCompactionHook(
 
   async function handleSummaryMessage(sessionID: string, messageInfo: MessageInfo): Promise<void> {
     if (savedSummaryMessages.has(messageInfo.id)) return;
-    savedSummaryMessages.add(messageInfo.id);
+    rememberSummary(messageInfo.id);
 
     log("[compaction] capturing summary for memory", { sessionID, messageID: messageInfo.id });
 

@@ -1,6 +1,6 @@
 # opencode-openmemory
 
-[![npm version](https://badge.fury.io/js/@happycastle%2Fopencode-openmemory.svg)](https://www.npmjs.com/package/@happycastle%2Fopencode-openmemory)
+[![npm version](https://badge.fury.io/js/@djbunting%2Fopencode-openmemory.svg)](https://www.npmjs.com/package/@djbunting%2Fopencode-openmemory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Local-first, privacy-focused persistent memory for OpenCode agents** using [OpenMemory](https://github.com/CaviraOSS/OpenMemory).
@@ -52,14 +52,14 @@ memories share one flat scope).
 ### 1. Install the plugin
 
 ```bash
-bunx @happycastle/opencode-openmemory@latest install
+bunx @djbunting/opencode-openmemory@latest install
 ```
 
 Or manually add to `~/.config/opencode/opencode.jsonc`:
 
 ```jsonc
 {
-  "plugin": ["@happycastle/opencode-openmemory@latest"]
+  "plugin": ["@djbunting/opencode-openmemory@latest"]
 }
 ```
 
@@ -219,7 +219,7 @@ Add to `~/.config/opencode/oh-my-opencode.json`:
 
 ```bash
 # Clone
-git clone https://github.com/happycastle114/opencode-openmemory.git
+git clone https://github.com/djbunting/opencode-openmemory.git
 cd opencode-openmemory
 
 # Install dependencies
@@ -240,7 +240,7 @@ bun run build && opencode --plugin ./dist/index.js
 
 ## Comparison with opencode-supermemory
 
-| Feature | opencode-supermemory | @happycastle/opencode-openmemory |
+| Feature | opencode-supermemory | @djbunting/opencode-openmemory |
 |---------|---------------------|-------------------------------------|
 | Backend | Supermemory Cloud | OpenMemory (local) |
 | Data Location | Cloud | Your machine |
@@ -263,9 +263,11 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Credits
 
+- Originally created by [@happycastle114](https://github.com/happycastle114) as
+  [happycastle114/opencode-openmemory](https://github.com/happycastle114/opencode-openmemory);
+  this is a fork maintained by [@djbunting](https://github.com/djbunting)
 - Based on [opencode-supermemory](https://github.com/supermemoryai/opencode-supermemory) by Supermemory
 - Uses [OpenMemory](https://github.com/CaviraOSS/OpenMemory) by CaviraOSS
-- Developed by [@happycastle114](https://github.com/happycastle114)
 
 ## Special Thanks
 

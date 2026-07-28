@@ -80,6 +80,11 @@ interface StoreToolResponse {
   hsg?: { id: string; primary_sector?: string };
 }
 
+interface GetToolResponse {
+  id?: string;
+  content?: string;
+}
+
 interface ListToolItem {
   id: string;
   primary_sector?: string;
@@ -274,6 +279,35 @@ export class McpMemoryClient implements IMemoryBackendClient {
     }
   }
 
+  /**
+   * Resolves a memory's full text, since list results are previews.
+   * Falls back to the preview rather than failing the whole listing: a
+   * truncated memory is still more useful than none.
+   */
+  private async fetchFullContent(
+    memoryId: string,
+    scope: MemoryScopeContext,
+    preview: string
+  ): Promise<string> {
+    try {
+      const result = await this.callTool("openmemory_get", {
+        id: memoryId,
+        user_id: getScopeKey(scope),
+      });
+
+      if (result.isError) return preview;
+
+      const data = extractJson<GetToolResponse>(result);
+      return data?.content || preview;
+    } catch (error) {
+      log("McpMemoryClient.fetchFullContent: falling back to preview", {
+        memoryId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return preview;
+    }
+  }
+
   async listMemories(
     scope: MemoryScopeContext,
     options?: { limit?: number; sector?: MemorySector }
@@ -293,18 +327,22 @@ export class McpMemoryClient implements IMemoryBackendClient {
 
       const data = extractJson<ListToolResponse>(result);
       const items = data?.items ?? [];
-      // Note: openmemory_list only returns a 240-char content preview,
-      // not the full memory content (the REST /memory/all endpoint
-      // returns full content; this tool does not have an equivalent).
-      const memories: MemoryItem[] = items.map((i) => ({
-        id: i.id,
-        content: i.content_preview,
-        salience: i.salience,
-        sector: i.primary_sector as MemorySector | undefined,
-        tags: i.tags,
-        metadata: i.metadata,
-        createdAt: i.last_seen_at ? new Date(i.last_seen_at).toISOString() : undefined,
-      }));
+
+      // openmemory_list only returns a 240-char `content_preview`. These
+      // memories get injected into the model's context as project
+      // knowledge, so a silently truncated one is worse than an extra
+      // round trip — backfill the full text via openmemory_get.
+      const memories: MemoryItem[] = await Promise.all(
+        items.map(async (i) => ({
+          id: i.id,
+          content: await this.fetchFullContent(i.id, scope, i.content_preview),
+          salience: i.salience,
+          sector: i.primary_sector as MemorySector | undefined,
+          tags: i.tags,
+          metadata: i.metadata,
+          createdAt: i.last_seen_at ? new Date(i.last_seen_at).toISOString() : undefined,
+        }))
+      );
 
       return { success: true, memories, total: memories.length };
     } catch (error) {
@@ -356,32 +394,23 @@ export class McpMemoryClient implements IMemoryBackendClient {
   async getProfile(scope: MemoryScopeContext, query?: string): Promise<ProfileResult> {
     log("McpMemoryClient.getProfile", { scope });
 
-    // OpenMemory's MCP tools don't expose a dedicated profile endpoint,
-    // and query results only carry last_seen_at (not a creation time).
-    // We approximate "static" (long-standing) vs "dynamic" (recent)
-    // facts using last_seen_at as a proxy for recency.
+    // OpenMemory's MCP tools expose no dedicated profile endpoint, and the
+    // only timestamp they return is last_seen_at — which is refreshed every
+    // time a memory is read, including by this very call. Bucketing on it
+    // into "long-standing" vs "recent" therefore collapses: after the first
+    // session everything looks recent. Rather than fake that distinction we
+    // return one ranked list of profile facts.
     const result = await this.searchMemories(query || "preferences style workflow", { userId: scope.userId }, {
-      limit: CONFIG.maxProfileItems * 2,
+      limit: CONFIG.maxProfileItems,
     });
 
     if (!result.success) {
       return { success: false, error: result.error };
     }
 
-    const now = Date.now();
-    const oneWeekAgo = now - 7 * 24 * 60 * 60 * 1000;
+    const facts = result.results.slice(0, CONFIG.maxProfileItems).map((m) => m.content);
 
-    const staticFacts = result.results
-      .filter((m) => m.createdAt && new Date(m.createdAt).getTime() < oneWeekAgo)
-      .slice(0, CONFIG.maxProfileItems)
-      .map((m) => m.content);
-
-    const dynamicFacts = result.results
-      .filter((m) => !m.createdAt || new Date(m.createdAt).getTime() >= oneWeekAgo)
-      .slice(0, CONFIG.maxProfileItems)
-      .map((m) => m.content);
-
-    return { success: true, profile: { static: staticFacts, dynamic: dynamicFacts } };
+    return { success: true, profile: { static: facts, dynamic: [] } };
   }
 
   async close(): Promise<void> {

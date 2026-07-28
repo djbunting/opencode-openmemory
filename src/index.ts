@@ -53,8 +53,8 @@ function withBudget<T>(promise: Promise<T>, ms: number, label: string): Promise<
 }
 
 export const OpenMemoryPlugin: Plugin = async (ctx: PluginInput) => {
-  const { directory } = ctx;
-  const scopes = getScopes(directory);
+  const { directory, project } = ctx;
+  const scopes = getScopes(directory, project);
   const injectedSessions = new Set<string>();
   log("Plugin init", { directory, scopes, configured: isConfigured() });
 
