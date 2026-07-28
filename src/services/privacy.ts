@@ -7,6 +7,9 @@ export function stripPrivateContent(content: string): string {
 }
 
 export function isFullyPrivate(content: string): boolean {
-  const stripped = stripPrivateContent(content).trim();
-  return stripped === "[REDACTED]" || stripped === "";
+  // Remove every redaction marker rather than comparing against a single
+  // one: adjacent private blocks strip to "[REDACTED][REDACTED]", which
+  // an equality check would wrongly treat as having real content left.
+  const remaining = stripPrivateContent(content).replace(/\[REDACTED\]/g, "").trim();
+  return remaining === "";
 }

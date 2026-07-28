@@ -1,6 +1,6 @@
 {
   "name": "@happycastle/opencode-openmemory",
-  "version": "0.0.3",
+  "version": "0.2.0",
   "description": "OpenCode plugin that gives coding agents persistent memory using OpenMemory (local-first, privacy-focused)",
   "type": "module",
   "main": "dist/index.js",
@@ -11,7 +11,8 @@
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
     "dev": "tsc --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "bun test"
   },
   "keywords": [
     "opencode",
@@ -38,7 +39,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.0.162"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@opencode-ai/plugin": "^1.18.7"
   },
   "devDependencies": {
     "@types/bun": "latest",

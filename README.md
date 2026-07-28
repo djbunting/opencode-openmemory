@@ -25,23 +25,34 @@ A fork of [opencode-supermemory](https://github.com/supermemoryai/opencode-super
 │  - Memory Capture Policy (explicit "remember", implicit)      │
 │  - Scope Router (user_id, project_id)                         │
 └───────────────────┬───────────────────────────────────────────┘
-                    │
+                    │ MCP (stdio, spawned on demand)
                     v
 ┌───────────────────────────────────────────────────────────────┐
-│                 OpenMemory Server (REST API)                   │
+│              OpenMemory MCP Server (local process)             │
 │  - Store: raw notes / facts / events / snippets                │
 │  - Index: embeddings + metadata (scope/recency/type)           │
 │  - Retrieval: hybrid scoring (similarity + salience + decay)   │
-│  - Default: http://localhost:8080                              │
+│  - Spawned via: npx -y openmemory-js mcp                       │
 └───────────────────────────────────────────────────────────────┘
 ```
+
+By default the plugin talks to OpenMemory over **MCP** (spawning
+`openmemory-js mcp` as a local child process), not the REST API. This
+matters: OpenMemory's REST API (v1.2+) derives tenant identity from the
+API key itself and rejects any request that tries to set its own
+`user_id`, so it has no way to separate "project" memory from "user"
+memory under a single key. The MCP stdio transport has no such
+restriction, so it's what makes this plugin's project/user scope split
+actually work. See [Configuration](#configuration) if you want to point
+at a hosted/shared REST server instead (with the tradeoff that all
+memories share one flat scope).
 
 ## Installation
 
 ### 1. Install the plugin
 
 ```bash
-bunx @eddy.soungmin/opencode-openmemory@latest install
+bunx @happycastle/opencode-openmemory@latest install
 ```
 
 Or manually add to `~/.config/opencode/opencode.jsonc`:
@@ -52,32 +63,19 @@ Or manually add to `~/.config/opencode/opencode.jsonc`:
 }
 ```
 
-### 2. Start OpenMemory
+### 2. Make sure OpenMemory is runnable
 
-**Option A: Docker (recommended)**
+The default (MCP) backend spawns `npx -y openmemory-js mcp` on first use —
+no separate server process to manage, as long as `npx` can reach the
+package (first run will download it). Set an embedding provider via
+`mcpEnv` in your config if you're not using the synthetic/local default
+(see [Configuration](#configuration)).
 
-```bash
-git clone https://github.com/CaviraOSS/OpenMemory.git
-cd OpenMemory
-cp .env.example .env
-# Edit .env with your OPENAI_API_KEY (for embeddings)
-docker compose up --build -d
-```
-
-**Option B: Manual setup (for development)**
-
-```bash
-git clone https://github.com/CaviraOSS/OpenMemory.git
-cd OpenMemory/backend
-npm install
-npm run dev   # Starts on :8080 by default
-```
-
-For more details, see the [OpenMemory documentation](https://github.com/CaviraOSS/OpenMemory).
+If you'd rather run a persistent shared server, see the
+[OpenMemory documentation](https://github.com/CaviraOSS/OpenMemory) for
+Docker/manual setup, then switch `backend` to `"rest"` below.
 
 ### 3. Restart OpenCode
-
-The plugin will automatically connect to OpenMemory REST API at `http://localhost:8080`.
 
 ## Configuration
 
@@ -85,11 +83,31 @@ Create `~/.config/opencode/openmemory.jsonc`:
 
 ```jsonc
 {
-  // OpenMemory REST API URL
-  "apiUrl": "http://localhost:8080",
-  
+  // "mcp" (default): spawns a local OpenMemory MCP server on demand.
+  //   Supports real user-vs-project memory scoping.
+  // "rest": talks to a hosted/shared OpenMemory REST server. That API
+  //   scopes everything to the API key, so there's no user/project split.
+  "backend": "mcp",
+
+  // MCP backend settings (only used when backend is "mcp")
+  "mcpCommand": "npx",
+  "mcpArgs": ["-y", "openmemory-js", "mcp"],
+  "mcpEnv": {
+    // "OM_EMBEDDINGS": "openai",
+    // "OPENAI_API_KEY": "..."
+  },
+  // Timeout (ms) for a single MCP tool call
+  "mcpTimeout": 30000,
+  // Timeout (ms) for the initial spawn + handshake. Higher than mcpTimeout
+  // because a cold `npx -y openmemory-js mcp` downloads the package first
+  // (a measured cold start took ~26s).
+  "mcpConnectTimeout": 60000,
+
+  // REST backend settings (only used when backend is "rest")
+  // "apiUrl": "http://localhost:8080",
+  // "apiKey": "your-api-key",
+
   // Search settings
-  "similarityThreshold": 0.6,
   "maxMemories": 5,
   "maxProjectMemories": 10,
   "maxProfileItems": 5,
@@ -99,12 +117,19 @@ Create `~/.config/opencode/openmemory.jsonc`:
   "injectProfile": true,
   
   // Scope prefix for organizing memories
-  "scopePrefix": "opencode",
-  
-  // Default sector for storing memories
-  "defaultSector": "semantic"
+  "scopePrefix": "opencode"
 }
 ```
+
+### REST backend requires an API key
+
+OpenMemory's REST API derives tenant identity from the API key and returns
+`503` when the server has no key configured, so `backend: "rest"` is useless
+without an `apiKey`. If you set `"backend": "rest"` and don't supply one
+(either `apiKey` in this file or the `OPENMEMORY_API_KEY` environment
+variable), the plugin **disables itself** and silently does nothing rather
+than firing failing requests on every session. The default `"mcp"` backend
+needs no key — only a runnable `mcpCommand` (defaults to `npx`).
 
 ## Usage
 
@@ -161,16 +186,26 @@ Run the `/openmemory-init` command to deeply research your codebase and populate
 
 ## Context Compaction
 
-When the context window fills up (80% by default), the plugin:
+OpenCode decides when to compact and drives the summarization itself. This
+plugin hooks into that process rather than replacing it:
 
-1. Injects project knowledge into the summary prompt
-2. Triggers OpenCode's summarization
-3. Saves the summary as a memory for future sessions
-4. Automatically resumes the conversation
+1. On `experimental.session.compacting`, it appends project knowledge from
+   OpenMemory plus a structured outline (original requests, final goal, work
+   completed, remaining tasks, hard constraints) to the compaction prompt
+2. OpenCode summarizes and auto-continues the conversation natively
+3. When the summary lands, the plugin saves it as a `conversation` memory so
+   it survives into future sessions
+
+Earlier versions detected the threshold, triggered summarization, and
+re-prompted the session themselves by writing synthetic messages into
+OpenCode's on-disk storage. That approach broke when OpenCode moved its
+message store, and is no longer used.
 
 ## Usage with Oh My OpenCode
 
-If you're using [Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode), disable its built-in auto-compact hook to let this plugin handle context compaction:
+If you're using [Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode)
+and see compaction happening twice, disable its context-recovery hook so
+OpenCode's native compaction is the only thing driving it:
 
 Add to `~/.config/opencode/oh-my-opencode.json`:
 
@@ -205,7 +240,7 @@ bun run build && opencode --plugin ./dist/index.js
 
 ## Comparison with opencode-supermemory
 
-| Feature | opencode-supermemory | @eddy.soungmin/opencode-openmemory |
+| Feature | opencode-supermemory | @happycastle/opencode-openmemory |
 |---------|---------------------|-------------------------------------|
 | Backend | Supermemory Cloud | OpenMemory (local) |
 | Data Location | Cloud | Your machine |

@@ -9,37 +9,8 @@ export type MemoryType =
   | "learned-pattern"
   | "conversation";
 
-export type ConversationRole = "user" | "assistant" | "system" | "tool";
-
-export type ConversationContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; imageUrl: { url: string } };
-
-export interface ConversationToolCall {
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-export interface ConversationMessage {
-  role: ConversationRole;
-  content: string | ConversationContentPart[];
-  name?: string;
-  tool_calls?: ConversationToolCall[];
-  tool_call_id?: string;
-}
-
-export interface ConversationIngestResponse {
-  id: string;
-  conversationId: string;
-  status: string;
-}
-
 // OpenMemory sector types (HSG - Hierarchical Semantic Graph)
-export type MemorySector = 
+export type MemorySector =
   | "episodic"    // Events, experiences, temporal sequences
   | "semantic"    // Facts, concepts, general knowledge
   | "procedural"  // Skills, how-to knowledge, processes
@@ -95,6 +66,11 @@ export interface ProfileResult {
   error?: string;
 }
 
+// userId/projectId are opaque per-scope identifiers (see services/tags.ts).
+// The MCP backend passes these straight through to OpenMemory's
+// user_id/project_id tool params. The REST backend ignores projectId
+// (see services/client.ts for why) and only trusts the tenant derived
+// server-side from the API key.
 export interface MemoryScopeContext {
   userId: string;
   projectId?: string;
@@ -124,124 +100,6 @@ export interface IMemoryBackendClient {
   getProfile(scope: MemoryScopeContext, query?: string): Promise<ProfileResult>;
 
   reinforceMemory?(memoryId: string, boost?: number): Promise<{ success: boolean; salience?: number; error?: string }>;
-}
 
-// Temporal Knowledge Graph types
-export interface TemporalFact {
-  id: string;
-  subject: string;
-  predicate: string;
-  object: string;
-  valid_from: string;
-  valid_to?: string;
-  confidence: number;
-  metadata?: Record<string, unknown>;
-  created_at?: string;
-}
-
-export interface CreateTemporalFactInput {
-  subject: string;
-  predicate: string;
-  object: string;
-  validFrom?: string;
-  confidence?: number;
-  metadata?: Record<string, unknown>;
-}
-
-export interface CreateTemporalFactResult {
-  success: boolean;
-  id?: string;
-  subject?: string;
-  predicate?: string;
-  object?: string;
-  valid_from?: string;
-  confidence?: number;
-  error?: string;
-}
-
-export interface QueryTemporalFactsInput {
-  subject?: string;
-  predicate?: string;
-  object?: string;
-  at?: string;
-  minConfidence?: number;
-}
-
-export interface QueryTemporalFactsResult {
-  success: boolean;
-  facts: TemporalFact[];
-  count: number;
-  error?: string;
-}
-
-export interface GetCurrentFactInput {
-  subject: string;
-  predicate: string;
-}
-
-export interface GetCurrentFactResult {
-  success: boolean;
-  fact?: TemporalFact;
-  error?: string;
-}
-
-export interface GetTimelineInput {
-  subject: string;
-  predicate?: string;
-}
-
-export interface TimelineEntry {
-  id: string;
-  predicate: string;
-  object: string;
-  valid_from: string;
-  valid_to?: string;
-  confidence: number;
-}
-
-export interface GetTimelineResult {
-  success: boolean;
-  subject: string;
-  predicate?: string;
-  timeline: TimelineEntry[];
-  count: number;
-  error?: string;
-}
-
-export interface InvalidateFactInput {
-  id: string;
-  validTo?: string;
-}
-
-export interface InvalidateFactResult {
-  success: boolean;
-  id?: string;
-  valid_to?: string;
-  error?: string;
-}
-
-export interface TemporalStatsResult {
-  success: boolean;
-  active_facts?: number;
-  historical_facts?: number;
-  total_facts?: number;
-  error?: string;
-}
-
-export interface CompareFactsInput {
-  subject: string;
-  time1: string;
-  time2: string;
-}
-
-export interface CompareFactsResult {
-  success: boolean;
-  subject?: string;
-  time1?: string;
-  time2?: string;
-  added: TemporalFact[];
-  removed: TemporalFact[];
-  changed: Array<{ before: TemporalFact; after: TemporalFact }>;
-  unchanged: TemporalFact[];
-  error?: string;
+  close?(): Promise<void>;
 }

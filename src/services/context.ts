@@ -6,6 +6,29 @@ interface MemoriesResponseMinimal {
   memories?: MemoryItem[];
 }
 
+// Renders one memory as `[sector][score%] content`, omitting whichever
+// pieces are absent. Score/salience are compared against undefined rather
+// than tested for truthiness so a genuine 0 still renders.
+function formatMemoryLine(
+  mem: MemoryItem,
+  options?: { includeSector?: boolean }
+): string {
+  const segments: string[] = [];
+
+  if (options?.includeSector && mem.sector) {
+    segments.push(`[${mem.sector}]`);
+  }
+
+  if (mem.score !== undefined) {
+    segments.push(`[${Math.round(mem.score * 100)}%]`);
+  } else if (mem.salience !== undefined) {
+    segments.push(`[sal:${Math.round(mem.salience * 100)}%]`);
+  }
+
+  const content = mem.content || "";
+  return segments.length > 0 ? `${segments.join("")} ${content}` : content;
+}
+
 export function formatContextForPrompt(
   profile: ProfileResult | null,
   userMemories: MemoriesResponseMinimal,
@@ -31,40 +54,22 @@ export function formatContextForPrompt(
     }
   }
 
-  const projectResults = projectMemories.results || projectMemories.memories || [];
+  // `??` rather than `||` to state the intent directly: a present-but-empty
+  // `results` wins over `memories`. (Behaviour is identical either way here,
+  // since `[]` is truthy — `??` just doesn't rely on that to be read.)
+  const projectResults = projectMemories.results ?? projectMemories.memories ?? [];
   if (projectResults.length > 0) {
     parts.push("\nProject Knowledge:");
     projectResults.forEach((mem) => {
-      const score = mem.score ? Math.round(mem.score * 100) : null;
-      const salience = mem.salience ? Math.round(mem.salience * 100) : null;
-      const content = mem.content || "";
-      
-      if (score !== null) {
-        parts.push(`- [${score}%] ${content}`);
-      } else if (salience !== null) {
-        parts.push(`- [sal:${salience}%] ${content}`);
-      } else {
-        parts.push(`- ${content}`);
-      }
+      parts.push(`- ${formatMemoryLine(mem)}`);
     });
   }
 
-  const userResults = userMemories.results || userMemories.memories || [];
+  const userResults = userMemories.results ?? userMemories.memories ?? [];
   if (userResults.length > 0) {
     parts.push("\nRelevant Memories:");
     userResults.forEach((mem) => {
-      const score = mem.score ? Math.round(mem.score * 100) : null;
-      const salience = mem.salience ? Math.round(mem.salience * 100) : null;
-      const content = mem.content || "";
-      const sector = mem.sector ? `[${mem.sector}]` : "";
-      
-      if (score !== null) {
-        parts.push(`- ${sector}[${score}%] ${content}`);
-      } else if (salience !== null) {
-        parts.push(`- ${sector}[sal:${salience}%] ${content}`);
-      } else {
-        parts.push(`- ${sector} ${content}`);
-      }
+      parts.push(`- ${formatMemoryLine(mem, { includeSector: true })}`);
     });
   }
 

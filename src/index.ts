@@ -2,9 +2,9 @@ import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import type { Part } from "@opencode-ai/sdk";
 import { tool } from "@opencode-ai/plugin";
 
-import { openMemoryClient, getMemoryClient } from "./services/client.js";
+import { openMemoryClient, getMemoryClient, closeMemoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
-import { getScopes, getTags } from "./services/tags.js";
+import { getScopes } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
 
@@ -37,10 +37,24 @@ function detectMemoryKeyword(text: string): boolean {
   return MEMORY_KEYWORD_PATTERN.test(textWithoutCode);
 }
 
+// Upper bound on how long the first message may wait for memory context.
+// Deliberately shorter than the backend's own per-call timeout: injected
+// context is a nice-to-have, and stalling the user's turn to get it is not
+// a good trade. Skipped injections retry on the next message.
+const CONTEXT_INJECTION_BUDGET_MS = 10_000;
+
+function withBudget<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms budget`)), ms)
+    ),
+  ]);
+}
+
 export const OpenMemoryPlugin: Plugin = async (ctx: PluginInput) => {
   const { directory } = ctx;
   const scopes = getScopes(directory);
-  const tags = getTags(directory);
   const injectedSessions = new Set<string>();
   log("Plugin init", { directory, scopes, configured: isConfigured() });
 
@@ -49,10 +63,25 @@ export const OpenMemoryPlugin: Plugin = async (ctx: PluginInput) => {
   }
 
   const compactionHook = isConfigured() && ctx.client
-    ? createCompactionHook(ctx as CompactionContext, tags, scopes)
+    ? createCompactionHook(ctx as CompactionContext, scopes)
     : null;
 
+  // Warm the backend in the background. The MCP backend spawns a child
+  // process on first use, and a cold `npx -y openmemory-js mcp` has to
+  // download the package first (measured at ~26s). Kicking that off here
+  // keeps it off the critical path of the user's first message.
+  // Fire-and-forget: real errors surface on the actual calls.
+  if (isConfigured()) {
+    void openMemoryClient
+      .listMemories(scopes.project, { limit: 1 })
+      .catch(() => {});
+  }
+
   return {
+    dispose: async () => {
+      await closeMemoryClient();
+    },
+
     "chat.message": async (input, output) => {
       if (!isConfigured()) return;
 
@@ -97,13 +126,33 @@ export const OpenMemoryPlugin: Plugin = async (ctx: PluginInput) => {
         const isFirstMessage = !injectedSessions.has(input.sessionID);
 
         if (isFirstMessage) {
+          // Marked up front so two messages racing in the same session
+          // can't both fetch and double-inject. Cleared again if the
+          // fetch fails, so a later message retries against a backend
+          // that has since warmed up.
           injectedSessions.add(input.sessionID);
 
-          const [profileResult, userMemoriesResult, projectMemoriesListResult] = await Promise.all([
-            openMemoryClient.getProfile(scopes.user, userMessage),
-            openMemoryClient.searchMemories(userMessage, scopes.user, { limit: CONFIG.maxMemories }),
-            openMemoryClient.listMemories(scopes.project, { limit: CONFIG.maxProjectMemories }),
-          ]);
+          let fetched;
+          try {
+            fetched = await withBudget(
+              Promise.all([
+                openMemoryClient.getProfile(scopes.user, userMessage),
+                openMemoryClient.searchMemories(userMessage, scopes.user, {
+                  limit: CONFIG.maxMemories,
+                  minSalience: CONFIG.minSalience,
+                }),
+                openMemoryClient.listMemories(scopes.project, { limit: CONFIG.maxProjectMemories }),
+              ]),
+              CONTEXT_INJECTION_BUDGET_MS,
+              "context injection"
+            );
+          } catch (error) {
+            injectedSessions.delete(input.sessionID);
+            log("chat.message: context injection skipped", { error: String(error) });
+            return;
+          }
+
+          const [profileResult, userMemoriesResult, projectMemoriesListResult] = fetched;
 
           const profile = profileResult.success ? profileResult : null;
           const userMemories = userMemoriesResult.success ? userMemoriesResult : { results: [] };
@@ -515,6 +564,12 @@ export const OpenMemoryPlugin: Plugin = async (ctx: PluginInput) => {
           }
         },
       }),
+    },
+
+    "experimental.session.compacting": async (input, output) => {
+      if (compactionHook) {
+        await compactionHook["experimental.session.compacting"](input, output);
+      }
     },
 
     event: async (input: { event: { type: string; properties?: unknown } }) => {

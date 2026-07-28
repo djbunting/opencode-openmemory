@@ -39,18 +39,15 @@ export function getScopes(directory: string): { user: MemoryScopeContext; projec
   };
 }
 
-// Legacy tag-based functions for backward compatibility
-export function getUserTag(): string {
-  return `${CONFIG.scopePrefix}_user_${getUserId()}`;
-}
-
-export function getProjectTag(directory: string): string {
-  return `${CONFIG.scopePrefix}_project_${getProjectId(directory)}`;
-}
-
-export function getTags(directory: string): { user: string; project: string } {
-  return {
-    user: getUserTag(),
-    project: getProjectTag(directory),
-  };
+/**
+ * Collapses a scope into a single opaque identifier for backends whose
+ * only isolation knob is a flat `user_id` string (e.g. the currently
+ * published openmemory-js MCP tools, which predate native project_id
+ * support). Project scope becomes userId+projectId so it stays isolated
+ * both from other users and from that user's other projects.
+ */
+export function getScopeKey(scope: MemoryScopeContext): string {
+  return scope.projectId
+    ? `${CONFIG.scopePrefix}:${scope.userId}:${scope.projectId}`
+    : `${CONFIG.scopePrefix}:${scope.userId}`;
 }

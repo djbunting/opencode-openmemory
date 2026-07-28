@@ -8,7 +8,7 @@ import { stripJsoncComments } from "./services/jsonc.js";
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
-const PLUGIN_NAME = "opencode-openmemory@latest";
+const PLUGIN_NAME = "@happycastle/opencode-openmemory@latest";
 
 const OPENMEMORY_INIT_COMMAND = `---
 description: Initialize OpenMemory with comprehensive codebase knowledge
@@ -340,29 +340,38 @@ function createOpenMemoryConfig(): boolean {
   
   const config = `{
   // OpenMemory Backend Configuration
-  // Options: "openmemory" (MCP - default), "openmemory-rest" (REST API)
-  "backend": "openmemory",
-  
-  // REST API settings (only used when backend is "openmemory-rest")
+  // "mcp" (default): spawns a local OpenMemory MCP server on demand.
+  //   Supports real user-vs-project memory scoping.
+  // "rest": talks to a hosted/shared OpenMemory REST server. That API
+  //   scopes everything to the API key, so there's no user/project split.
+  "backend": "mcp",
+
+  // MCP backend settings (only used when backend is "mcp")
+  // "mcpCommand": "npx",
+  // "mcpArgs": ["-y", "openmemory-js", "mcp"],
+  // "mcpEnv": { "OM_EMBEDDINGS": "openai", "OPENAI_API_KEY": "..." },
+  // Timeout (ms) for a single MCP tool call.
+  "mcpTimeout": 30000,
+  // Timeout (ms) for the initial spawn + handshake. Higher because a cold
+  // \`npx -y openmemory-js mcp\` downloads the package first (~26s measured).
+  "mcpConnectTimeout": 60000,
+
+  // REST backend settings (only used when backend is "rest")
+  // An apiKey is REQUIRED for "rest" - without one the plugin disables itself.
   // "apiUrl": "http://localhost:8080",
-  // "apiKey": "your-api-key-if-needed",
-  
+  // "apiKey": "your-api-key",
+
   // Search settings
-  "similarityThreshold": 0.6,
   "maxMemories": 5,
   "maxProjectMemories": 10,
   "maxProfileItems": 5,
   "minSalience": 0.3,
-  
+
   // Context injection
   "injectProfile": true,
-  
+
   // Scope prefix for organizing memories
-  "scopePrefix": "opencode",
-  
-  // Default sector for storing memories
-  // Options: "episodic", "semantic", "procedural", "emotional", "reflective"
-  "defaultSector": "semantic"
+  "scopePrefix": "opencode"
 }
 `;
   
@@ -439,13 +448,13 @@ async function install(options: InstallOptions): Promise<number> {
   if (isOhMyOpencodeInstalled()) {
     console.log("\nStep 4: Configure Oh My OpenCode");
     console.log("Detected Oh My OpenCode plugin.");
-    console.log("OpenMemory handles context compaction, so the built-in context-window-limit-recovery hook should be disabled.");
+    console.log("OpenCode compacts context natively now. Disabling the context-window-limit-recovery hook avoids compacting twice.");
     
     if (isAutoCompactAlreadyDisabled()) {
       console.log("✓ anthropic-context-window-limit-recovery hook already disabled");
     } else {
       if (options.tui) {
-        const shouldDisable = await confirm(rl!, "Disable anthropic-context-window-limit-recovery hook to let OpenMemory handle context?");
+        const shouldDisable = await confirm(rl!, "Disable anthropic-context-window-limit-recovery hook so only OpenCode's native compaction runs?");
         if (!shouldDisable) {
           console.log("Skipped.");
         } else {
