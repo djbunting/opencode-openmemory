@@ -259,6 +259,12 @@ message. Subsequent runs are fast.
 Verify network access and that `npx -y openmemory-js mcp` runs by hand.
 Point `mcpCommand`/`mcpArgs` at a local install if you'd rather pin it.
 
+**Leftover `openmemory-js` processes** — the plugin runs one MCP server per
+session and shuts it down on exit, including on Ctrl+C. A server can only be
+left behind if OpenCode is killed outright (`SIGKILL` / `Stop-Process -Force`),
+since no cleanup can run in that case. Find any strays with
+`ps aux | grep openmemory-js` (or `Get-Process node` on Windows).
+
 **Memories from an older version disappeared** — project scope identity
 changed to use OpenCode's stable project id instead of a hash of the
 directory path. The old scheme produced different ids for `C:\p`, `C:/p` and

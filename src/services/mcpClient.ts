@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { spawnSync } from "node:child_process";
 import { CONFIG } from "../config.js";
 import { log } from "./logger.js";
 import { getScopeKey } from "./tags.js";
@@ -117,6 +118,73 @@ function resultToText(result: ToolCallResult): string {
 }
 
 /**
+ * PIDs of MCP servers we have spawned and not yet closed.
+ *
+ * `dispose()` handles orderly shutdown, but it never runs when the host dies
+ * abruptly — a crash, a kill, or a stopped background job. Without this the
+ * child survives its parent indefinitely, holding a SQLite connection open;
+ * in testing, 17 such servers accumulated over a day.
+ */
+const liveServerPids = new Set<number>();
+let exitHandlersInstalled = false;
+
+/**
+ * Kills a spawned server and everything below it, synchronously.
+ *
+ * One `process.kill(pid)` is not enough. `StdioClientTransport` spawns via
+ * cross-spawn, so on Windows the pid we hold is a `cmd`/`npx` wrapper and the
+ * real `openmemory-js` process is its child — killing the wrapper leaves the
+ * grandchild running, reparented and unreachable. Measured directly: the pid
+ * the transport reported was the *parent* of the surviving server process.
+ *
+ * Must stay synchronous so it can run inside `process.on("exit")`, which
+ * permits no async work.
+ */
+function killProcessTree(pid: number): void {
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+      return;
+    }
+    // POSIX: the child is normally its own group leader here, so signal the
+    // group first to catch descendants, then fall back to the bare pid.
+    try {
+      process.kill(-pid);
+    } catch {
+      process.kill(pid);
+    }
+  } catch {
+    // Already gone, or not ours any more — nothing to do either way.
+  }
+}
+
+function killLiveServers(): void {
+  for (const pid of liveServerPids) killProcessTree(pid);
+  liveServerPids.clear();
+}
+
+function installExitHandlers(): void {
+  if (exitHandlersInstalled) return;
+  exitHandlersInstalled = true;
+
+  process.once("exit", killLiveServers);
+
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      killLiveServers();
+      // Attaching a signal listener suppresses Node's default
+      // terminate-on-signal. We are a plugin inside someone else's process,
+      // so only reproduce that default when nothing else is listening —
+      // otherwise the host owns the shutdown and forcing an exit here would
+      // cut its own cleanup short. The count includes this listener.
+      if (process.listenerCount(signal) <= 1) {
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      }
+    });
+  }
+}
+
+/**
  * MCP backend: spawns OpenMemory's own MCP server (`openmemory-js mcp`)
  * as a local stdio child process. Unlike the REST API, the stdio MCP
  * transport has no per-request API key, so OpenMemory trusts whatever
@@ -134,6 +202,7 @@ function resultToText(result: ToolCallResult): string {
 export class McpMemoryClient implements IMemoryBackendClient {
   private client: Client | null = null;
   private connecting: Promise<Client> | null = null;
+  private pid: number | null = null;
 
   private async getClient(): Promise<Client> {
     if (this.client) return this.client;
@@ -161,17 +230,26 @@ export class McpMemoryClient implements IMemoryBackendClient {
       } catch (error) {
         // Tear down the half-spawned child: on a timeout the `npx` process is
         // still alive and would otherwise be orphaned for the session.
+        const failedPid = transport.pid;
         log("McpMemoryClient: connect failed, tearing down transport", {
-          pid: transport.pid,
+          pid: failedPid,
           error: error instanceof Error ? error.message : String(error),
         });
-        // Not awaited: killing the child can take seconds on some platforms
-        // and the caller's timeout budget is already spent.
+        // Track it while teardown runs. Teardown is not awaited (killing the
+        // child can take seconds and the caller's budget is already spent),
+        // so without this a host exit during that window would orphan it.
+        if (failedPid !== null) {
+          installExitHandlers();
+          liveServerPids.add(failedPid);
+        }
         void client
           .close()
           .catch(() => {})
           .then(() => transport.close())
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            if (failedPid !== null) liveServerPids.delete(failedPid);
+          });
         throw error;
       }
 
@@ -179,13 +257,26 @@ export class McpMemoryClient implements IMemoryBackendClient {
         log("McpMemoryClient: server stderr", { message: chunk.toString().trim() });
       });
 
+      // Track the child so an abrupt host exit still takes it down. Untracked
+      // again on close, so a recycled pid can never be signalled by mistake.
+      const pid = transport.pid;
+      if (pid !== null) {
+        installExitHandlers();
+        liveServerPids.add(pid);
+        this.pid = pid;
+      }
+
       client.onclose = () => {
         log("McpMemoryClient: connection closed");
-        if (this.client === client) this.client = null;
+        if (pid !== null) liveServerPids.delete(pid);
+        if (this.client === client) {
+          this.client = null;
+          this.pid = null;
+        }
       };
 
       this.client = client;
-      log("McpMemoryClient: connected");
+      log("McpMemoryClient: connected", { pid });
       return client;
     })();
 
@@ -414,10 +505,25 @@ export class McpMemoryClient implements IMemoryBackendClient {
   }
 
   async close(): Promise<void> {
+    const pid = this.pid;
+
     if (this.client) {
-      log("McpMemoryClient: closing");
+      log("McpMemoryClient: closing", { pid });
+      // Tear the tree down *before* awaiting the graceful close. Once the
+      // wrapper process exits, its children are reparented and can no longer
+      // be found from this pid — so a graceful-first order would strand
+      // exactly the processes we are trying to reap. OpenMemory's SQLite
+      // store is crash-safe, so forcing this is the right trade against
+      // leaking a server per session.
+      if (pid !== null) killProcessTree(pid);
       await this.client.close().catch(() => {});
       this.client = null;
     }
+
+    // onclose normally untracks the pid; drop it here too so a close that
+    // never fires the event can't leave a stale entry behind that a later
+    // exit handler would signal at a since-recycled pid.
+    if (pid !== null) liveServerPids.delete(pid);
+    this.pid = null;
   }
 }
