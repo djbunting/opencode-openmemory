@@ -17,7 +17,16 @@ interface OpenMemoryConfig {
   // client-supplied scope, so REST mode has a single flat scope per key.
   backend?: "mcp" | "rest";
 
-  // MCP backend settings (used when backend is "mcp")
+  // MCP backend settings (used when backend is "mcp").
+  //
+  // Set mcpUrl to talk to an already-running OpenMemory over its HTTP MCP
+  // endpoint (e.g. "http://host:8800/mcp") instead of spawning a local
+  // server. Remote servers derive user identity from the API key, but still
+  // honour a client-supplied project_id, so project scoping keeps working.
+  mcpUrl?: string;
+  mcpHeaders?: Record<string, string>;
+
+  // Used only when spawning a local server (i.e. when mcpUrl is unset).
   mcpCommand?: string;
   mcpArgs?: string[];
   // Extra env vars passed to the spawned MCP server process (e.g. for
@@ -44,7 +53,7 @@ interface OpenMemoryConfig {
   scopePrefix?: string;
 }
 
-const DEFAULTS: Required<Omit<OpenMemoryConfig, "apiKey" | "mcpEnv">> = {
+const DEFAULTS: Required<Omit<OpenMemoryConfig, "apiKey" | "mcpEnv" | "mcpUrl" | "mcpHeaders">> = {
   backend: "mcp",
   mcpCommand: "npx",
   mcpArgs: ["-y", "openmemory-js", "mcp"],
@@ -93,12 +102,31 @@ export const OPENMEMORY_API_URL = fileConfig.apiUrl ?? process.env.OPENMEMORY_AP
 function resolveBackend(): "mcp" | "rest" {
   const explicit = fileConfig.backend ?? (process.env.OPENMEMORY_BACKEND as "mcp" | "rest" | undefined);
   if (explicit) return explicit;
+  // An mcpUrl is an unambiguous request for the MCP backend, and must win over
+  // the legacy inference below — a remote MCP endpoint is normally configured
+  // alongside the apiUrl/apiKey of the very same server.
+  if (fileConfig.mcpUrl || process.env.OPENMEMORY_MCP_URL) return "mcp";
   if (fileConfig.apiUrl || fileConfig.apiKey) return "rest";
   return DEFAULTS.backend;
 }
 
+/**
+ * Auth headers for a remote MCP endpoint. Explicit `mcpHeaders` win; otherwise
+ * an `apiKey` is promoted to a Bearer token, so pointing `mcpUrl` at a server
+ * you already have REST credentials for needs no extra configuration.
+ */
+function resolveMcpHeaders(): Record<string, string> | undefined {
+  if (fileConfig.mcpHeaders) return fileConfig.mcpHeaders;
+  const key = fileConfig.apiKey ?? process.env.OPENMEMORY_API_KEY;
+  return key ? { Authorization: `Bearer ${key}` } : undefined;
+}
+
+export const MCP_URL = fileConfig.mcpUrl ?? process.env.OPENMEMORY_MCP_URL;
+
 export const CONFIG = {
   backend: resolveBackend(),
+  mcpUrl: MCP_URL,
+  mcpHeaders: resolveMcpHeaders(),
   mcpCommand: fileConfig.mcpCommand ?? DEFAULTS.mcpCommand,
   mcpArgs: fileConfig.mcpArgs ?? DEFAULTS.mcpArgs,
   mcpEnv: fileConfig.mcpEnv,
@@ -122,7 +150,13 @@ export function isConfigured(): boolean {
     return Boolean(OPENMEMORY_API_KEY);
   }
 
-  // MCP: all we need is something to spawn. mcpCommand defaults to "npx",
-  // so this is effectively always true unless the user blanked it out.
+  // MCP over HTTP: a reachable endpoint is the only requirement. Auth may
+  // legitimately be absent for a server running without OM_API_KEY.
+  if (CONFIG.mcpUrl) {
+    return CONFIG.mcpUrl.trim().length > 0;
+  }
+
+  // MCP over stdio: all we need is something to spawn. mcpCommand defaults to
+  // "npx", so this is effectively always true unless the user blanked it out.
   return CONFIG.mcpCommand.trim().length > 0;
 }

@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { spawnSync } from "node:child_process";
 import { CONFIG } from "../config.js";
 import { log } from "./logger.js";
@@ -88,6 +89,7 @@ interface GetToolResponse {
 
 interface ListToolItem {
   id: string;
+  project_id?: string;
   primary_sector?: string;
   salience?: number;
   last_seen_at?: number;
@@ -184,25 +186,72 @@ function installExitHandlers(): void {
   }
 }
 
+/** OpenMemory's reserved bucket for memories that belong to no one project. */
+const GLOBAL_PROJECT_ID = "system_global";
+
 /**
- * MCP backend: spawns OpenMemory's own MCP server (`openmemory-js mcp`)
- * as a local stdio child process. Unlike the REST API, the stdio MCP
- * transport has no per-request API key, so OpenMemory trusts whatever
- * user_id the caller passes.
+ * How this connection expresses "user X, project Y" to the server.
  *
- * As of openmemory-js@1.3.x (the version `npx openmemory-js` currently
- * installs), the MCP tools only take a flat `user_id` — there's no
- * `project_id` param or `openmemory_store_project` tool yet (that exists
- * on OpenMemory's unreleased main branch, not on npm). So user-vs-project
- * scoping here is done the same way the old REST client used to do it:
- * project scope is folded into a single compound user_id string
- * (see getScopeKey in tags.ts). Once openmemory-js publishes native
- * project_id support, this can switch to passing project_id directly.
+ * - `project`: the server takes a `project_id` argument, so scopes map
+ *   directly onto it. Real per-project isolation, verified against a live
+ *   server: a query filtered to project B does not see project A's memories,
+ *   while `system_global` entries stay visible to every project.
+ * - `compound`: the server predates `project_id` (openmemory-js@1.3.x on npm
+ *   still does), so the project has to be folded into the `user_id` string
+ *   the way the old REST client did it — see getScopeKey in tags.ts.
+ */
+export type ScopingMode = "project" | "compound";
+
+/**
+ * Just the user half of the identity, for tools that take no `project_id`
+ * (openmemory_store, openmemory_get). Empty when the server derives the user
+ * from the API key, since supplying one there is answered with a 403.
+ */
+export function identityArgsFor(
+  scoping: ScopingMode,
+  serverOwnsUserId: boolean,
+  scope: MemoryScopeContext
+): Record<string, unknown> {
+  if (serverOwnsUserId) return {};
+  return { user_id: scoping === "compound" ? getScopeKey(scope) : scope.userId };
+}
+
+/**
+ * Full identity arguments for a tool call.
+ *
+ * In `project` mode the project rides in its own `project_id`, defaulting to
+ * OpenMemory's global bucket for a scope with no project. In `compound` mode
+ * there is no `project_id` to use, so user and project collapse into a single
+ * opaque `user_id`.
+ */
+export function scopeArgsFor(
+  scoping: ScopingMode,
+  serverOwnsUserId: boolean,
+  scope: MemoryScopeContext
+): Record<string, unknown> {
+  const identity = identityArgsFor(scoping, serverOwnsUserId, scope);
+  if (scoping === "compound") return identity;
+  return { project_id: scope.projectId ?? GLOBAL_PROJECT_ID, ...identity };
+}
+
+/**
+ * MCP backend. Talks to OpenMemory either by spawning `openmemory-js mcp` as a
+ * local stdio child, or over the HTTP MCP endpoint of a server that is already
+ * running (set `mcpUrl`).
+ *
+ * The two differ in who owns identity. A stdio server has no request to carry
+ * an API key, so it trusts whatever `user_id` we pass. An HTTP server derives
+ * the user from the API key and rejects any mismatching `user_id` with
+ * `tenant_mismatch` — but it still honours a client-supplied `project_id`,
+ * which is what keeps project scoping working remotely.
  */
 export class McpMemoryClient implements IMemoryBackendClient {
   private client: Client | null = null;
   private connecting: Promise<Client> | null = null;
   private pid: number | null = null;
+  private scoping: ScopingMode = "compound";
+  /** True when the server pins user identity to the API key (HTTP transport). */
+  private serverOwnsUserId = false;
 
   private async getClient(): Promise<Client> {
     if (this.client) return this.client;
@@ -210,18 +259,40 @@ export class McpMemoryClient implements IMemoryBackendClient {
 
     this.connecting = (async () => {
       const connectTimeout = timeoutFor("mcpConnectTimeout", DEFAULT_CONNECT_TIMEOUT_MS);
-      log("McpMemoryClient: spawning server", {
-        command: CONFIG.mcpCommand,
-        args: CONFIG.mcpArgs,
-        connectTimeoutMs: connectTimeout,
-      });
+      const remoteUrl = CONFIG.mcpUrl;
 
-      const transport = new StdioClientTransport({
-        command: CONFIG.mcpCommand,
-        args: CONFIG.mcpArgs,
-        env: { ...(process.env as Record<string, string>), ...CONFIG.mcpEnv },
-        stderr: "pipe",
-      });
+      if (remoteUrl) {
+        log("McpMemoryClient: connecting to remote server", {
+          url: remoteUrl,
+          authenticated: Boolean(CONFIG.mcpHeaders),
+          connectTimeoutMs: connectTimeout,
+        });
+      } else {
+        log("McpMemoryClient: spawning server", {
+          command: CONFIG.mcpCommand,
+          args: CONFIG.mcpArgs,
+          connectTimeoutMs: connectTimeout,
+        });
+      }
+
+      const transport = remoteUrl
+        ? new StreamableHTTPClientTransport(new URL(remoteUrl), {
+            requestInit: CONFIG.mcpHeaders ? { headers: CONFIG.mcpHeaders } : undefined,
+          })
+        : new StdioClientTransport({
+            command: CONFIG.mcpCommand,
+            args: CONFIG.mcpArgs,
+            env: { ...(process.env as Record<string, string>), ...CONFIG.mcpEnv },
+            stderr: "pipe",
+          });
+
+      // A remote server derives the user from the API key and 403s on any
+      // user_id we supply, so we must leave it off entirely.
+      this.serverOwnsUserId = Boolean(remoteUrl);
+
+      // pid and stderr exist only on the stdio transport; there is no child
+      // process to track or reap when we are talking to a remote server.
+      const stdioTransport = remoteUrl ? null : (transport as StdioClientTransport);
 
       const client = new Client({ name: "opencode-openmemory", version: "0.2.0" }, { capabilities: {} });
 
@@ -230,7 +301,7 @@ export class McpMemoryClient implements IMemoryBackendClient {
       } catch (error) {
         // Tear down the half-spawned child: on a timeout the `npx` process is
         // still alive and would otherwise be orphaned for the session.
-        const failedPid = transport.pid;
+        const failedPid = stdioTransport?.pid ?? null;
         log("McpMemoryClient: connect failed, tearing down transport", {
           pid: failedPid,
           error: error instanceof Error ? error.message : String(error),
@@ -253,18 +324,20 @@ export class McpMemoryClient implements IMemoryBackendClient {
         throw error;
       }
 
-      transport.stderr?.on("data", (chunk: Buffer) => {
+      stdioTransport?.stderr?.on("data", (chunk: Buffer) => {
         log("McpMemoryClient: server stderr", { message: chunk.toString().trim() });
       });
 
       // Track the child so an abrupt host exit still takes it down. Untracked
       // again on close, so a recycled pid can never be signalled by mistake.
-      const pid = transport.pid;
+      const pid = stdioTransport?.pid ?? null;
       if (pid !== null) {
         installExitHandlers();
         liveServerPids.add(pid);
         this.pid = pid;
       }
+
+      await this.detectScoping(client);
 
       client.onclose = () => {
         log("McpMemoryClient: connection closed");
@@ -292,6 +365,67 @@ export class McpMemoryClient implements IMemoryBackendClient {
     }
   }
 
+  /**
+   * Asks the server which scoping vocabulary it speaks. Newer builds expose
+   * `openmemory_store_project` and accept `project_id`; openmemory-js@1.3.x on
+   * npm does not, and needs the project folded into `user_id` instead.
+   *
+   * A failure here is not fatal — we fall back to the compound form, which
+   * every version understands.
+   */
+  private async detectScoping(client: Client): Promise<void> {
+    try {
+      const { tools } = await withTimeout(
+        client.listTools(),
+        timeoutFor("mcpTimeout", DEFAULT_CALL_TIMEOUT_MS),
+        "MCP listTools"
+      );
+      const names = new Set(tools.map((t) => t.name));
+      const queryAcceptsProject = Boolean(
+        tools.find((t) => t.name === "openmemory_query")?.inputSchema?.properties?.["project_id"]
+      );
+      this.scoping =
+        names.has("openmemory_store_project") && queryAcceptsProject ? "project" : "compound";
+    } catch (error) {
+      this.scoping = "compound";
+      log("McpMemoryClient: scoping detection failed, assuming compound", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    log("McpMemoryClient: scoping mode", {
+      scoping: this.scoping,
+      serverOwnsUserId: this.serverOwnsUserId,
+    });
+  }
+
+  /**
+   * Ensures the connection — and therefore the detected scoping mode — is
+   * established before any scope arguments are built.
+   *
+   * `scoping` and `serverOwnsUserId` are only known once we have handshaked
+   * and called listTools. Callers that read them while building a request
+   * must await this first, or the very first call of a session silently uses
+   * the pessimistic defaults: it would store to the global bucket instead of
+   * the project one, making that memory visible to every project.
+   */
+  private async ready(): Promise<void> {
+    await this.getClient();
+  }
+
+  private scopeArgs(scope: MemoryScopeContext): Record<string, unknown> {
+    return scopeArgsFor(this.scoping, this.serverOwnsUserId, scope);
+  }
+
+  private identityArgs(scope: MemoryScopeContext): Record<string, unknown> {
+    return identityArgsFor(this.scoping, this.serverOwnsUserId, scope);
+  }
+
+  /** Whether a project-scoped write should use openmemory_store_project. */
+  private useProjectStore(scope: MemoryScopeContext): boolean {
+    return this.scoping === "project" && Boolean(scope.projectId);
+  }
+
   private async callTool(name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
     const client = await this.getClient();
     return withTimeout(
@@ -309,12 +443,13 @@ export class McpMemoryClient implements IMemoryBackendClient {
     log("McpMemoryClient.searchMemories", { query: query.slice(0, 50), scope });
 
     try {
+      await this.ready();
       const result = await this.callTool("openmemory_query", {
         query,
         k: options?.limit ?? CONFIG.maxMemories,
         sector: options?.sector,
         min_salience: options?.minSalience,
-        user_id: getScopeKey(scope),
+        ...this.scopeArgs(scope),
       });
 
       if (result.isError) {
@@ -348,14 +483,27 @@ export class McpMemoryClient implements IMemoryBackendClient {
     log("McpMemoryClient.addMemory", { contentLength: content.length, scope });
 
     try {
+      // Must precede the scoping reads below.
+      await this.ready();
+
       const metadata = { ...options?.metadata, type: options?.type, source: "opencode-openmemory" };
 
-      const result = await this.callTool("openmemory_store", {
-        content,
-        tags: options?.tags,
-        metadata,
-        user_id: getScopeKey(scope),
-      });
+      // openmemory_store always files under system_global and takes no
+      // project_id, so a project-scoped write has to go through
+      // openmemory_store_project. Without project support there is only the
+      // one tool, and the whole scope rides in user_id instead.
+      const useProjectTool = this.useProjectStore(scope);
+      const result = await this.callTool(
+        useProjectTool ? "openmemory_store_project" : "openmemory_store",
+        {
+          content,
+          tags: options?.tags,
+          metadata,
+          // A global write must not carry project_id — openmemory_store
+          // rejects nothing but ignores it, and sending it invites confusion.
+          ...(useProjectTool ? this.scopeArgs(scope) : this.identityArgs(scope)),
+        }
+      );
 
       if (result.isError) {
         return { success: false, error: resultToText(result) };
@@ -381,9 +529,10 @@ export class McpMemoryClient implements IMemoryBackendClient {
     preview: string
   ): Promise<string> {
     try {
+      await this.ready();
       const result = await this.callTool("openmemory_get", {
         id: memoryId,
-        user_id: getScopeKey(scope),
+        ...this.identityArgs(scope),
       });
 
       if (result.isError) return preview;
@@ -406,10 +555,11 @@ export class McpMemoryClient implements IMemoryBackendClient {
     log("McpMemoryClient.listMemories", { scope, limit: options?.limit });
 
     try {
+      await this.ready();
       const result = await this.callTool("openmemory_list", {
         limit: options?.limit ?? CONFIG.maxProjectMemories,
         sector: options?.sector,
-        user_id: getScopeKey(scope),
+        ...this.scopeArgs(scope),
       });
 
       if (result.isError) {
@@ -417,7 +567,15 @@ export class McpMemoryClient implements IMemoryBackendClient {
       }
 
       const data = extractJson<ListToolResponse>(result);
-      const items = data?.items ?? [];
+      let items = data?.items ?? [];
+
+      // A project-filtered list also returns system_global entries. Those are
+      // already injected via the user scope, so keeping them here would spend
+      // the context budget on the same memory twice. Items without a
+      // project_id are kept — older servers don't report one.
+      if (this.scoping === "project" && scope.projectId) {
+        items = items.filter((i) => !i.project_id || i.project_id === scope.projectId);
+      }
 
       // openmemory_list only returns a 240-char `content_preview`. These
       // memories get injected into the model's context as project
@@ -447,9 +605,10 @@ export class McpMemoryClient implements IMemoryBackendClient {
     log("McpMemoryClient.deleteMemory", { memoryId });
 
     try {
+      await this.ready();
       const result = await this.callTool("openmemory_delete", {
         id: memoryId,
-        user_id: getScopeKey(scope),
+        ...this.scopeArgs(scope),
       });
 
       if (result.isError) {

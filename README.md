@@ -25,35 +25,36 @@ A fork of [opencode-supermemory](https://github.com/supermemoryai/opencode-super
 │  - Memory Capture Policy (explicit "remember", implicit)      │
 │  - Scope Router (user_id, project_id)                         │
 └───────────────────┬───────────────────────────────────────────┘
-                    │ MCP (stdio, spawned on demand)
+                    │ MCP — stdio (spawned) or HTTP (remote)
                     v
 ┌───────────────────────────────────────────────────────────────┐
-│              OpenMemory MCP Server (local process)             │
+│                     OpenMemory Server                          │
 │  - Store: raw notes / facts / events / snippets                │
 │  - Index: embeddings + metadata (scope/recency/type)           │
 │  - Retrieval: hybrid scoring (similarity + salience + decay)   │
-│  - Spawned via: npx -y openmemory-js mcp                       │
+│  - Local:  npx -y openmemory-js mcp                            │
+│  - Remote: mcpUrl -> http://host:8800/mcp                      │
 └───────────────────────────────────────────────────────────────┘
 ```
 
-By default the plugin talks to OpenMemory over **MCP** (spawning
-`openmemory-js mcp` as a local child process), not the REST API. This
-matters: OpenMemory's REST API (v1.2+) derives tenant identity from the
-API key itself and rejects any request that tries to set its own
-`user_id`, so it has no way to separate "project" memory from "user"
-memory under a single key. The MCP stdio transport has no such
-restriction, so it's what makes this plugin's project/user scope split
-actually work. See [Configuration](#configuration) if you want to point
-at a hosted/shared REST server instead (with the tradeoff that all
-memories share one flat scope).
+The plugin talks to OpenMemory over **MCP**, not the REST API. This matters:
+OpenMemory's REST API (v1.2+) derives identity from the API key and rejects any
+request supplying its own `user_id`, so it cannot separate project memory from
+user memory under a single key. MCP can — over stdio it accepts both
+identifiers, and over HTTP it still honours `project_id`.
+
+By default it spawns a local server. Set `mcpUrl` to use one you already run,
+which keeps memories on your own server *and* preserves per-project scoping.
+See [Choosing a deployment](#choosing-a-deployment) for the tradeoffs.
 
 ## Requirements
 
 - **OpenCode** with plugin API `1.18` or newer (this plugin uses the native
   `experimental.session.compacting` hook)
 - **Bun** — to build from source
-- **`npx` on your PATH** — the default MCP backend downloads and runs
-  `openmemory-js` on first use. Nothing to install or keep running yourself.
+- **`npx` on your PATH** — only for the default local backend, which downloads
+  and runs `openmemory-js` on first use. Not needed if you set `mcpUrl` to point
+  at a server you already run.
 - An **embeddings provider** is optional; OpenMemory falls back to a local
   synthetic embedder if you don't configure one.
 
@@ -170,8 +171,10 @@ To change anything, create `~/.config/opencode/openmemory.jsonc`:
 
 | Option | Default | Description |
 |---|---|---|
-| `backend` | `"mcp"`\* | `"mcp"` spawns a local OpenMemory server; `"rest"` talks to a hosted one |
-| `mcpCommand` | `"npx"` | Executable used to start the MCP server |
+| `backend` | `"mcp"`\* | `"mcp"` uses the MCP protocol; `"rest"` uses the REST API |
+| `mcpUrl` | — | HTTP MCP endpoint of a running server (e.g. `http://host:8800/mcp`). Set this to use a remote server instead of spawning a local one |
+| `mcpHeaders` | derived | Headers for `mcpUrl`. Defaults to `Authorization: Bearer <apiKey>` when `apiKey` is set |
+| `mcpCommand` | `"npx"` | Executable used to spawn a local server (ignored when `mcpUrl` is set) |
 | `mcpArgs` | `["-y","openmemory-js","mcp"]` | Arguments passed to `mcpCommand` |
 | `mcpEnv` | — | Extra env vars for the spawned server, merged over the parent environment |
 | `mcpTimeout` | `30000` | Timeout (ms) for one MCP tool call |
@@ -185,13 +188,61 @@ To change anything, create `~/.config/opencode/openmemory.jsonc`:
 | `injectProfile` | `true` | Whether to inject the user profile at all |
 | `scopePrefix` | `"opencode"` | Namespace prefix for memory scope keys |
 
-\* If `backend` is not set but `apiUrl` or `apiKey` is, the backend defaults to
-`"rest"` instead. Configs predating the `backend` option were pointing at a REST
-server, and silently moving them to a local store would make every existing
-memory look like it had vanished. Set `backend` explicitly to override this.
+\* Backend resolution, in order: an explicit `backend` wins; then `mcpUrl`
+implies `"mcp"`; then `apiUrl`/`apiKey` imply `"rest"`; otherwise `"mcp"`. The
+`apiUrl`/`apiKey` rule exists because configs predating the `backend` option
+were pointing at a REST server, and silently moving them to a local store would
+make every existing memory look like it had vanished.
 
-Environment variables `OPENMEMORY_BACKEND`, `OPENMEMORY_API_URL` and
-`OPENMEMORY_API_KEY` are honoured when the corresponding file option is absent.
+Environment variables `OPENMEMORY_BACKEND`, `OPENMEMORY_MCP_URL`,
+`OPENMEMORY_API_URL` and `OPENMEMORY_API_KEY` are honoured when the
+corresponding file option is absent.
+
+### Choosing a deployment
+
+There are three shapes, and they differ in where memories live and whether
+projects stay isolated from one another.
+
+| | Storage | Project isolation | Notes |
+|---|---|---|---|
+| **Local MCP** (default) | On this machine | Yes | Spawns `openmemory-js mcp`. Nothing to run yourself. |
+| **Remote MCP** (`mcpUrl`) | Your server | Yes | Best of both: shared server, real per-project scoping. |
+| **REST** (`apiUrl`) | Your server | **No** | One flat scope per API key. |
+
+Isolation differs because of how OpenMemory handles identity. A local stdio
+server has no request carrying an API key, so it trusts the `user_id` we send.
+A remote server derives the user from the API key and rejects a supplied
+`user_id` outright — but it still honours a client-supplied `project_id`, which
+is what keeps project scoping working over MCP. The REST API offers no
+equivalent, so everything there shares one scope.
+
+### Connecting to a remote OpenMemory server
+
+Point `mcpUrl` at the server's `/mcp` endpoint. Setting it is enough to select
+the MCP backend:
+
+```jsonc
+{
+  "mcpUrl": "http://192.168.1.170:8800/mcp",
+  "apiKey": "your-server-api-key",
+
+  "maxMemories": 5,
+  "maxProjectMemories": 10,
+  "injectProfile": true
+}
+```
+
+`apiKey` is promoted to `Authorization: Bearer …` automatically; use
+`mcpHeaders` instead if your server expects something else. Project memories
+are filed under a `project_id` derived from OpenCode's project identity, and
+cross-project ("user" scope) memories go to OpenMemory's shared
+`system_global` bucket, so they stay visible from every project.
+
+The plugin detects at connect time whether the server supports `project_id`.
+Older servers — including the current `openmemory-js` on npm — don't, and it
+transparently falls back to folding the project into the `user_id` instead.
+That fallback cannot work against a remote server, which pins `user_id` to the
+API key; in that combination you get one flat scope, same as REST.
 
 ### Using an embeddings provider
 
