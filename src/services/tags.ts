@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
-import { CONFIG } from "../config.js";
+import { CONFIG, loadProjectConfig } from "../config.js";
 import type { MemoryScopeContext } from "../types/index.js";
 
 function sha256(input: string): string {
@@ -49,15 +49,21 @@ export function getProjectId(directory: string): string {
 /**
  * Identity of the project a session belongs to.
  *
- * Prefers OpenCode's own `project.id`, which is stable across sessions and
- * independent of how the path was spelled or which subdirectory the session
- * was opened from. Falls back to hashing the worktree root (or the given
- * directory) when OpenCode doesn't supply one — e.g. older hosts or tests.
+ * Resolution order:
+ *  1. `projectId` in `<directory>/.opencode/openmemory.jsonc` — lets a repo
+ *     share a scope with other OpenMemory clients that already use a chosen
+ *     name, rather than OpenCode's opaque id.
+ *  2. `projectId` in the global config, for a single-project setup.
+ *  3. OpenCode's own `project.id`, stable across sessions and independent of
+ *     how the path was spelled or which subdirectory was opened.
+ *  4. A hash of the worktree root, for hosts that supply no project identity.
  */
 export function getProjectScopeId(
   directory: string,
   project?: { id?: string; worktree?: string }
 ): string {
+  const override = loadProjectConfig(project?.worktree || directory).projectId ?? CONFIG.projectId;
+  if (override) return override;
   if (project?.id) return project.id;
   return getProjectId(project?.worktree || directory);
 }

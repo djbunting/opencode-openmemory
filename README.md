@@ -187,6 +187,7 @@ To change anything, create `~/.config/opencode/openmemory.jsonc`:
 | `minSalience` | `0.3` | Salience floor for automatic injection (explicit searches ignore it) |
 | `injectProfile` | `true` | Whether to inject the user profile at all |
 | `scopePrefix` | `"opencode"` | Namespace prefix for memory scope keys |
+| `projectId` | derived | Pins the project scope to a fixed name. Best set per project — see [Sharing a scope](#sharing-a-scope-with-other-openmemory-clients) |
 
 \* Backend resolution, in order: an explicit `backend` wins; then `mcpUrl`
 implies `"mcp"`; then `apiUrl`/`apiKey` imply `"rest"`; otherwise `"mcp"`. The
@@ -243,6 +244,29 @@ Older servers — including the current `openmemory-js` on npm — don't, and it
 transparently falls back to folding the project into the `user_id` instead.
 That fallback cannot work against a remote server, which pins `user_id` to the
 API key; in that combination you get one flat scope, same as REST.
+
+### Sharing a scope with other OpenMemory clients
+
+By default the project scope is derived from OpenCode's own project identity,
+which is stable but opaque. Other OpenMemory clients — the MCP server wired
+directly into `opencode.json`, an IDE extension, your own scripts — typically
+use a readable name like `handheldlive`. Those are different scopes, so the
+plugin would not see memories written under the readable name.
+
+To share one scope, pin it per project in `<project>/.opencode/openmemory.jsonc`:
+
+```jsonc
+{
+  "projectId": "handheldlive"
+}
+```
+
+Now the plugin reads and writes the same `project_id` as everything else
+pointing at that name. Resolution order is: this file, then a global
+`projectId`, then OpenCode's project id, then a hash of the worktree path.
+
+Only `projectId` is read from the project-local file; every other option stays
+per-machine in `~/.config/opencode/openmemory.jsonc`.
 
 ### Using an embeddings provider
 

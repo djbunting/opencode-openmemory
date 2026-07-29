@@ -51,9 +51,17 @@ interface OpenMemoryConfig {
 
   injectProfile?: boolean;
   scopePrefix?: string;
+
+  // Pins the identifier used for project-scoped memories, instead of deriving
+  // one from OpenCode's project identity. Set this to share a scope with other
+  // OpenMemory clients that already use a chosen name (e.g. "handheldlive").
+  // Best set per project in <project>/.opencode/openmemory.jsonc.
+  projectId?: string;
 }
 
-const DEFAULTS: Required<Omit<OpenMemoryConfig, "apiKey" | "mcpEnv" | "mcpUrl" | "mcpHeaders">> = {
+const DEFAULTS: Required<
+  Omit<OpenMemoryConfig, "apiKey" | "mcpEnv" | "mcpUrl" | "mcpHeaders" | "projectId">
+> = {
   backend: "mcp",
   mcpCommand: "npx",
   mcpArgs: ["-y", "openmemory-js", "mcp"],
@@ -68,17 +76,34 @@ const DEFAULTS: Required<Omit<OpenMemoryConfig, "apiKey" | "mcpEnv" | "mcpUrl" |
   scopePrefix: "opencode",
 };
 
+function readConfigFile(path: string): OpenMemoryConfig | null {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(stripJsoncComments(readFileSync(path, "utf-8"))) as OpenMemoryConfig;
+  } catch {
+    return null; // Invalid config, fall back to defaults
+  }
+}
+
 function loadConfig(): OpenMemoryConfig {
   for (const path of CONFIG_FILES) {
-    if (existsSync(path)) {
-      try {
-        const content = readFileSync(path, "utf-8");
-        const json = stripJsoncComments(content);
-        return JSON.parse(json) as OpenMemoryConfig;
-      } catch {
-        // Invalid config, use defaults
-      }
-    }
+    const config = readConfigFile(path);
+    if (config) return config;
+  }
+  return {};
+}
+
+/**
+ * Per-project overrides from `<directory>/.opencode/openmemory.jsonc`.
+ *
+ * Read at plugin init rather than module load, because the global config knows
+ * nothing about which project a session belongs to. Only `projectId` is
+ * meaningful here — everything else is a per-machine concern.
+ */
+export function loadProjectConfig(directory: string): { projectId?: string } {
+  for (const name of ["openmemory.jsonc", "openmemory.json"]) {
+    const config = readConfigFile(join(directory, ".opencode", name));
+    if (config?.projectId) return { projectId: config.projectId };
   }
   return {};
 }
@@ -139,6 +164,7 @@ export const CONFIG = {
   minSalience: fileConfig.minSalience ?? DEFAULTS.minSalience,
   injectProfile: fileConfig.injectProfile ?? DEFAULTS.injectProfile,
   scopePrefix: fileConfig.scopePrefix ?? DEFAULTS.scopePrefix,
+  projectId: fileConfig.projectId,
 };
 
 export function isConfigured(): boolean {
