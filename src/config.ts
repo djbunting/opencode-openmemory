@@ -79,8 +79,26 @@ const fileConfig = loadConfig();
 export const OPENMEMORY_API_KEY = fileConfig.apiKey ?? process.env.OPENMEMORY_API_KEY;
 export const OPENMEMORY_API_URL = fileConfig.apiUrl ?? process.env.OPENMEMORY_API_URL ?? DEFAULTS.apiUrl;
 
+/**
+ * Chooses a backend when the config doesn't name one.
+ *
+ * Configs written before `backend` existed have no such field, but a user who
+ * set `apiUrl` or `apiKey` was unambiguously pointing at a REST server. If we
+ * applied the plain "mcp" default to those, the plugin would silently swap
+ * their real server for an empty local store and every existing memory would
+ * appear to vanish — which is exactly what happened when the default changed.
+ * An explicit `backend` always wins, so opting into MCP alongside leftover
+ * REST settings still works.
+ */
+function resolveBackend(): "mcp" | "rest" {
+  const explicit = fileConfig.backend ?? (process.env.OPENMEMORY_BACKEND as "mcp" | "rest" | undefined);
+  if (explicit) return explicit;
+  if (fileConfig.apiUrl || fileConfig.apiKey) return "rest";
+  return DEFAULTS.backend;
+}
+
 export const CONFIG = {
-  backend: fileConfig.backend ?? (process.env.OPENMEMORY_BACKEND as "mcp" | "rest" | undefined) ?? DEFAULTS.backend,
+  backend: resolveBackend(),
   mcpCommand: fileConfig.mcpCommand ?? DEFAULTS.mcpCommand,
   mcpArgs: fileConfig.mcpArgs ?? DEFAULTS.mcpArgs,
   mcpEnv: fileConfig.mcpEnv,

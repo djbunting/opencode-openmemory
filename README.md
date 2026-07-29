@@ -170,7 +170,7 @@ To change anything, create `~/.config/opencode/openmemory.jsonc`:
 
 | Option | Default | Description |
 |---|---|---|
-| `backend` | `"mcp"` | `"mcp"` spawns a local OpenMemory server; `"rest"` talks to a hosted one |
+| `backend` | `"mcp"`\* | `"mcp"` spawns a local OpenMemory server; `"rest"` talks to a hosted one |
 | `mcpCommand` | `"npx"` | Executable used to start the MCP server |
 | `mcpArgs` | `["-y","openmemory-js","mcp"]` | Arguments passed to `mcpCommand` |
 | `mcpEnv` | — | Extra env vars for the spawned server, merged over the parent environment |
@@ -184,6 +184,11 @@ To change anything, create `~/.config/opencode/openmemory.jsonc`:
 | `minSalience` | `0.3` | Salience floor for automatic injection (explicit searches ignore it) |
 | `injectProfile` | `true` | Whether to inject the user profile at all |
 | `scopePrefix` | `"opencode"` | Namespace prefix for memory scope keys |
+
+\* If `backend` is not set but `apiUrl` or `apiKey` is, the backend defaults to
+`"rest"` instead. Configs predating the `backend` option were pointing at a REST
+server, and silently moving them to a local store would make every existing
+memory look like it had vanished. Set `backend` explicitly to override this.
 
 Environment variables `OPENMEMORY_BACKEND`, `OPENMEMORY_API_URL` and
 `OPENMEMORY_API_KEY` are honoured when the corresponding file option is absent.
