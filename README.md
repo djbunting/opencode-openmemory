@@ -1,6 +1,6 @@
 # opencode-openmemory
 
-[![npm version](https://badge.fury.io/js/@djbunting%2Fopencode-openmemory.svg)](https://www.npmjs.com/package/@djbunting%2Fopencode-openmemory)
+[![CI](https://github.com/djbunting/opencode-openmemory/actions/workflows/ci.yml/badge.svg)](https://github.com/djbunting/opencode-openmemory/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Local-first, privacy-focused persistent memory for OpenCode agents** using [OpenMemory](https://github.com/CaviraOSS/OpenMemory).
@@ -47,15 +47,69 @@ actually work. See [Configuration](#configuration) if you want to point
 at a hosted/shared REST server instead (with the tradeoff that all
 memories share one flat scope).
 
+## Requirements
+
+- **OpenCode** with plugin API `1.18` or newer (this plugin uses the native
+  `experimental.session.compacting` hook)
+- **Bun** — to build from source
+- **`npx` on your PATH** — the default MCP backend downloads and runs
+  `openmemory-js` on first use. Nothing to install or keep running yourself.
+- An **embeddings provider** is optional; OpenMemory falls back to a local
+  synthetic embedder if you don't configure one.
+
 ## Installation
 
-### 1. Install the plugin
+> **This fork is not published to npm.** Install from source using Option A
+> below. Option B is for after you publish it under your own scope.
+
+### Option A — from source (current)
+
+```bash
+git clone https://github.com/djbunting/opencode-openmemory.git
+cd opencode-openmemory
+bun install
+bun run build
+```
+
+Then drop the built plugin into OpenCode's global plugin directory. Every
+file in that directory is loaded automatically — no `opencode.json` entry
+is needed.
+
+```bash
+# macOS / Linux
+mkdir -p ~/.config/opencode/plugins
+cp dist/index.js ~/.config/opencode/plugins/opencode-openmemory.js
+```
+
+```powershell
+# Windows (PowerShell)
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins"
+Copy-Item dist\index.js "$env:USERPROFILE\.config\opencode\plugins\opencode-openmemory.js"
+```
+
+The build is a self-contained ES module, so it needs no `node_modules`
+beside it. For a single project instead of every project, use that
+project's `.opencode/plugins/` directory.
+
+To also get the `/openmemory-init` slash command and a starter config file,
+run the bundled installer from the clone:
+
+```bash
+node dist/cli.js install
+```
+
+It writes `~/.config/opencode/command/openmemory-init.md` and
+`~/.config/opencode/openmemory.jsonc`. It will *also* add an npm plugin
+entry to your `opencode.json` — remove that line while installing from
+source, or OpenCode will fail trying to resolve an unpublished package.
+
+### Option B — from npm (once published)
 
 ```bash
 bunx @djbunting/opencode-openmemory@latest install
 ```
 
-Or manually add to `~/.config/opencode/opencode.jsonc`:
+Or add it manually to `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
@@ -63,23 +117,14 @@ Or manually add to `~/.config/opencode/opencode.jsonc`:
 }
 ```
 
-### 2. Make sure OpenMemory is runnable
+### Restart OpenCode
 
-The default (MCP) backend spawns `npx -y openmemory-js mcp` on first use —
-no separate server process to manage, as long as `npx` can reach the
-package (first run will download it). Set an embedding provider via
-`mcpEnv` in your config if you're not using the synthetic/local default
-(see [Configuration](#configuration)).
-
-If you'd rather run a persistent shared server, see the
-[OpenMemory documentation](https://github.com/CaviraOSS/OpenMemory) for
-Docker/manual setup, then switch `backend` to `"rest"` below.
-
-### 3. Restart OpenCode
+Plugins are loaded at startup, so restart before testing.
 
 ## Configuration
 
-Create `~/.config/opencode/openmemory.jsonc`:
+Configuration is optional — the defaults work with no config file at all.
+To change anything, create `~/.config/opencode/openmemory.jsonc`:
 
 ```jsonc
 {
@@ -121,6 +166,46 @@ Create `~/.config/opencode/openmemory.jsonc`:
 }
 ```
 
+### Options reference
+
+| Option | Default | Description |
+|---|---|---|
+| `backend` | `"mcp"` | `"mcp"` spawns a local OpenMemory server; `"rest"` talks to a hosted one |
+| `mcpCommand` | `"npx"` | Executable used to start the MCP server |
+| `mcpArgs` | `["-y","openmemory-js","mcp"]` | Arguments passed to `mcpCommand` |
+| `mcpEnv` | — | Extra env vars for the spawned server, merged over the parent environment |
+| `mcpTimeout` | `30000` | Timeout (ms) for one MCP tool call |
+| `mcpConnectTimeout` | `60000` | Timeout (ms) for spawn + handshake |
+| `apiUrl` | `http://localhost:8080` | REST server URL (`backend: "rest"` only) |
+| `apiKey` | — | REST API key (`backend: "rest"` only); also read from `OPENMEMORY_API_KEY` |
+| `maxMemories` | `5` | Relevant user memories injected per session |
+| `maxProjectMemories` | `10` | Project memories injected per session |
+| `maxProfileItems` | `5` | Profile facts injected per session |
+| `minSalience` | `0.3` | Salience floor for automatic injection (explicit searches ignore it) |
+| `injectProfile` | `true` | Whether to inject the user profile at all |
+| `scopePrefix` | `"opencode"` | Namespace prefix for memory scope keys |
+
+Environment variables `OPENMEMORY_BACKEND`, `OPENMEMORY_API_URL` and
+`OPENMEMORY_API_KEY` are honoured when the corresponding file option is absent.
+
+### Using an embeddings provider
+
+The spawned MCP server reads its own configuration from the environment, so
+pass provider settings through `mcpEnv`:
+
+```jsonc
+{
+  "mcpEnv": {
+    "OM_EMBEDDINGS": "openai",
+    "OPENAI_API_KEY": "sk-...",
+    "OM_TIER": "hybrid"
+  }
+}
+```
+
+Keep real keys out of version control — set them in your environment and
+they will be inherited by the spawned server without appearing in this file.
+
 ### REST backend requires an API key
 
 OpenMemory's REST API derives tenant identity from the API key and returns
@@ -130,6 +215,54 @@ without an `apiKey`. If you set `"backend": "rest"` and don't supply one
 variable), the plugin **disables itself** and silently does nothing rather
 than firing failing requests on every session. The default `"mcp"` backend
 needs no key — only a runnable `mcpCommand` (defaults to `npx`).
+
+REST mode also has no user-vs-project scope split, because that API refuses
+client-supplied scope identifiers. Everything lands in one flat scope per key.
+
+## Verify it's working
+
+After restarting OpenCode, ask the agent:
+
+```
+Use the openmemory tool with mode "help"
+```
+
+A usage guide means the plugin is loaded. Then try a round trip:
+
+```
+Remember that this project builds with `bun run build`
+```
+
+Start a **new** session in the same directory and ask what it remembers
+about building the project — the memory should come back. Memories are
+scoped per project, so a different project deliberately won't see it.
+
+## Troubleshooting
+
+The plugin logs everything to `~/.opencode-openmemory.log`. Check it first.
+
+**Nothing is injected and the log is empty** — the plugin isn't loaded.
+Confirm the file is in `~/.config/opencode/plugins/` and that you restarted
+OpenCode.
+
+**`Plugin disabled - OpenMemory not configured`** — you set
+`backend: "rest"` without an API key. Supply `apiKey`, or switch back to
+`"mcp"`.
+
+**First message is slow** — a cold `npx -y openmemory-js mcp` downloads the
+package, measured at roughly 26 seconds. The plugin pre-warms the backend at
+startup and caps first-message injection at 10 seconds, so it degrades to
+"no memory this turn" rather than blocking you; it retries on the next
+message. Subsequent runs are fast.
+
+**`MCP server connect timed out`** — `npx` can't fetch `openmemory-js`.
+Verify network access and that `npx -y openmemory-js mcp` runs by hand.
+Point `mcpCommand`/`mcpArgs` at a local install if you'd rather pin it.
+
+**Memories from an older version disappeared** — project scope identity
+changed to use OpenCode's stable project id instead of a hash of the
+directory path. The old scheme produced different ids for `C:\p`, `C:/p` and
+`c:\p`, so memories were already fragmented. There is no migration.
 
 ## Usage
 
@@ -160,8 +293,9 @@ The `openmemory` tool is available with these modes:
 | `add` | Store a new memory | `content`, `type?`, `scope?` |
 | `search` | Search memories | `query`, `scope?`, `limit?` |
 | `profile` | View user profile | `query?` |
-| `list` | List recent memories | `scope?`, `limit?` |
+| `list` | List recent memories | `scope?`, `sector?`, `limit?` |
 | `forget` | Remove a memory | `memoryId`, `scope?` |
+| `reinforce` | Boost a memory's salience | `memoryId`, `boost?` |
 | `help` | Show usage guide | - |
 
 **Scopes:**
@@ -225,17 +359,32 @@ cd opencode-openmemory
 # Install dependencies
 bun install
 
-# Type check
+# Type check (covers src and test)
 bun run typecheck
+
+# Run tests
+bun test
 
 # Build
 bun run build
 
 # Development (watch mode)
 bun run dev
+```
 
-# Local testing with OpenCode
-bun run build && opencode --plugin ./dist/index.js
+To iterate against a real OpenCode session, symlink the build into the
+global plugin directory once, then just rebuild and restart:
+
+```bash
+# macOS / Linux
+ln -sf "$PWD/dist/index.js" ~/.config/opencode/plugins/opencode-openmemory.js
+```
+
+```powershell
+# Windows (PowerShell, needs an elevated shell or Developer Mode)
+New-Item -ItemType SymbolicLink `
+  -Path "$env:USERPROFILE\.config\opencode\plugins\opencode-openmemory.js" `
+  -Target "$PWD\dist\index.js"
 ```
 
 ## Comparison with opencode-supermemory
